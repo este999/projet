@@ -1,0 +1,64 @@
+project:
+  name: "btc_direction_prediction"
+  author: "Esteban Nabonne"
+
+spark:
+  master: "local[*]"
+  shuffle_partitions: 8
+  log_level: "WARN"
+
+data:
+  # Path to Kaggle CSV files containing 1‑minute candles. Adjust to your local setup.
+  price_path: "data/prices/*.csv"
+  # Path to decoded blockchain Parquet dataset (optional). Leave null for price‑only baseline.
+  blockchain_path: null
+
+  # Column names for the price dataset. Modify if your CSV uses different names.
+  price_timestamp_col: "Timestamp"
+  price_open_col: "Open"
+  price_high_col: "High"
+  price_low_col: "Low"
+  price_close_col: "Close"
+  price_volume_col: "Volume_(BTC)"
+
+  # Date filtering: only use data within this range (inclusive).
+  start_date: "2019-01-01"
+  end_date: "2022-12-31"
+
+etl:
+  # Resampling frequency for price aggregation
+  resample_freq: "1 hour"
+  # Label horizon in hours (predict one hour ahead)
+  label_horizon_hours: 1
+
+features:
+  # Whether to include blockchain features when available
+  use_blockchain: false
+  # Price feature column names to assemble into the feature vector
+  price_features:
+    - "ret_1h"
+    - "vol_1h"
+    - "volatility_1h"
+    - "high_low_ratio"
+  # Blockchain feature column names (will be used only if use_blockchain is true)
+  blockchain_features:
+    - "tx_count_hour"
+    - "total_value_hour"
+
+model:
+  type: "logistic_regression"
+  params:
+    maxIter: 50
+    regParam: 0.0
+    elasticNetParam: 0.0
+
+train:
+  # End date of training period (inclusive)
+  train_end_date: "2021-12-31"
+  # Start date of testing period (inclusive)
+  test_start_date: "2022-01-01"
+
+output:
+  metrics_csv: "output/metrics.csv"
+  models_dir: "output/models"
+  logs_dir: "output/logs"
