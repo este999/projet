@@ -1,48 +1,41 @@
-"""Data ingestion functions for the Bitcoin price prediction pipeline.
+from typing import Dict, Any, Optional
 
-This module defines helper functions to load price data and blockchain
-data into PySpark DataFrames. The price ingestion supports standard
-CSV formats downloaded from Kaggle, while the blockchain ingestion is
-implemented as a stub that can be extended once a decoded blockchain
-dataset (e.g. Parquet) becomes available.
-"""
-
-from typing import Dict, Optional
-
-from pyspark.sql import DataFrame, SparkSession, functions as F
+from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import functions as F
 
 
-def load_price_data(spark: SparkSession, cfg: Dict[str, any]) -> DataFrame:
-    """Load historical price candles from CSV.
+def load_price_data(spark: SparkSession, cfg: Dict[str, Any]) -> DataFrame:
+    """Load historical price candles from CSV into a canonical schema.
 
-    The data is filtered to the date range specified in the config and
-    columns are renamed to a standard schema (open, high, low, close,
-    volume).
-
-    Args:
-        spark: Active Spark session.
-        cfg: Loaded configuration dictionary.
-
-    Returns:
-        A Spark DataFrame with a timestamp column named ``ts_raw`` and
-        columns ``open``, ``high``, ``low``, ``close`` and ``volume``.
+    Returns a DataFrame with:
+    - ts_raw (timestamp)
+    - open, high, low, close, volume (double)
     """
     data_cfg = cfg["data"]
     path = data_cfg["price_path"]
 
-    # Read raw CSV with header. Infers column types as strings.
+    # Lecture brute du CSV (toutes les colonnes arrivent en string)
     df = (
         spark.read
         .option("header", True)
         .csv(path)
     )
 
-    # Cast the timestamp column to actual timestamps. Column names can vary
-    # between Kaggle datasets (e.g. "Timestamp" or "date").
     ts_col = data_cfg["price_timestamp_col"]
-    df = df.withColumn("ts_raw", F.col(ts_col).cast("timestamp"))
+    # True si la colonne est un Unix timestamp en secondes (ex: "1562352720.0")
+    ts_is_unix = data_cfg.get("timestamp_is_unix", True)
 
-    # Filter the date range as defined in YAML.
+    if ts_is_unix:
+        # "1453430580.0" -> cast en double -> from_unixtime -> timestamp
+        df = df.withColumn(
+            "ts_raw",
+            F.from_unixtime(F.col(ts_col).cast("double")).cast("timestamp")
+        )
+    else:
+        # Cas où la colonne est déjà une string de type "YYYY-MM-DD HH:MM:SS"
+        df = df.withColumn("ts_raw", F.to_timestamp(F.col(ts_col)))
+
+    # Filtre sur la période
     start = data_cfg.get("start_date")
     end = data_cfg.get("end_date")
     if start:
@@ -50,7 +43,7 @@ def load_price_data(spark: SparkSession, cfg: Dict[str, any]) -> DataFrame:
     if end:
         df = df.filter(F.col("ts_raw") <= F.lit(end))
 
-    # Rename columns to a canonical schema.
+    # Renommage en schéma canonique
     df = (
         df
         .withColumnRenamed(data_cfg["price_open_col"], "open")
@@ -60,30 +53,21 @@ def load_price_data(spark: SparkSession, cfg: Dict[str, any]) -> DataFrame:
         .withColumnRenamed(data_cfg["price_volume_col"], "volume")
         .select("ts_raw", "open", "high", "low", "close", "volume")
     )
+
     return df
 
 
-def load_blockchain_data(spark: SparkSession, cfg: Dict[str, any]) -> Optional[DataFrame]:
-    """Load blockchain features from Parquet (placeholder).
+def load_blockchain_data(spark: SparkSession, cfg: Dict[str, Any]) -> Optional[DataFrame]:
+    """Load blockchain-derived features if a path is provided.
 
-    This function returns ``None`` when no ``blockchain_path`` is
-    configured. When a Parquet dataset is available, it should return
-    a DataFrame with at least a timestamp column (timestamp truncated
-    to the hour) and aggregated blockchain metrics such as transaction
-    counts or total transferred value.
-
-    Args:
-        spark: Active Spark session.
-        cfg: Loaded configuration dictionary.
-
-    Returns:
-        A DataFrame with blockchain features or ``None`` if absent.
+    Returns None when no blockchain dataset is configured.
     """
-    path = cfg["data"].get("blockchain_path")
+    data_cfg = cfg.get("data", {})
+    path = data_cfg.get("blockchain_path")
+
+    # Si tu n'as pas encore de dataset blockchain, laisse blockchain_path: null dans le YAML
     if not path:
-        # No blockchain dataset configured. Baseline will run on price data.
         return None
 
-    # Load Parquet dataset. Assumes schema is already appropriate.
     df = spark.read.parquet(path)
     return df

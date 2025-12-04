@@ -8,42 +8,40 @@ spark:
   log_level: "WARN"
 
 data:
-  # Path to Kaggle CSV files containing 1‑minute candles. Adjust to your local setup.
-  price_path: "data/prices/*.csv"
-  # Path to decoded blockchain Parquet dataset (optional). Leave null for price‑only baseline.
+  # On ne prend que le 1-min pour l’instant
+  price_path: "data/prices/btcusd_1-min_data.csv"
+
+  # Pas encore de dataset blockchain décodé => on désactive
   blockchain_path: null
 
-  # Column names for the price dataset. Modify if your CSV uses different names.
   price_timestamp_col: "Timestamp"
   price_open_col: "Open"
   price_high_col: "High"
   price_low_col: "Low"
   price_close_col: "Close"
-  price_volume_col: "Volume_(BTC)"
+  price_volume_col: "Volume"
 
-  # Date filtering: only use data within this range (inclusive).
+  timezone: "UTC"
   start_date: "2019-01-01"
   end_date: "2022-12-31"
 
+  timestamp_is_unix: true 
+
 etl:
-  # Resampling frequency for price aggregation
   resample_freq: "1 hour"
-  # Label horizon in hours (predict one hour ahead)
   label_horizon_hours: 1
 
 features:
-  # Whether to include blockchain features when available
-  use_blockchain: false
-  # Price feature column names to assemble into the feature vector
+  use_blockchain: false        # très important pour éviter le join sur un DF vide
   price_features:
     - "ret_1h"
     - "vol_1h"
     - "volatility_1h"
     - "high_low_ratio"
-  # Blockchain feature column names (will be used only if use_blockchain is true)
   blockchain_features:
     - "tx_count_hour"
     - "total_value_hour"
+
 
 model:
   type: "logistic_regression"

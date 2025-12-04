@@ -6,29 +6,28 @@ volatility, ratios), and optionally join blockchain features. It also
 creates binary labels for next‑horizon price direction.
 """
 
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 
 from pyspark.sql import DataFrame, Window, functions as F
 
 
-def build_price_features(df_prices: DataFrame, cfg: Dict[str, any]) -> DataFrame:
-    """Aggregate minute candles into hourly features.
+def build_price_features(df_prices: DataFrame, cfg: Dict[str, Any]) -> DataFrame:
+    freq = cfg["etl"]["resample_freq"]  # e.g. "1 hour"
 
-    Args:
-        df_prices: DataFrame with columns ``ts_raw``, ``open``, ``high``,
-            ``low``, ``close`` and ``volume`` where ``ts_raw`` is a
-            timestamp.
-        cfg: Loaded configuration dictionary.
+    # 🔹 1. Cast des colonnes numériques en double
+    df_cast = (
+        df_prices
+        .withColumn("open", F.col("open").cast("double"))
+        .withColumn("high", F.col("high").cast("double"))
+        .withColumn("low", F.col("low").cast("double"))
+        .withColumn("close", F.col("close").cast("double"))
+        .withColumn("volume", F.col("volume").cast("double"))
+    )
 
-    Returns:
-        A DataFrame indexed by an hourly timestamp with aggregated
-        features including returns, volatility and high/low ratio.
-    """
-    freq = cfg["etl"]["resample_freq"]
+    # 🔹 2. Fenêtre horaire
+    df = df_cast.withColumn("ts_hour_window", F.window("ts_raw", freq))
 
-    # Create hourly windows and aggregate statistics within each window.
-    df = df_prices.withColumn("ts_hour_window", F.window("ts_raw", freq))
-
+    # 🔹 3. Agrégation à l’heure
     agg = (
         df.groupBy("ts_hour_window")
         .agg(
@@ -50,16 +49,17 @@ def build_price_features(df_prices: DataFrame, cfg: Dict[str, any]) -> DataFrame
         )
     )
 
-    # Compute lagged return and high/low ratio. Drop incomplete rows.
+    # 🔹 4. Ajout du retour 1h (log-return) et du ratio high/low
     w = Window.orderBy("ts_hour")
     agg = (
         agg
-        .withColumn("close_prev", F.lag("close_1h").over(w))
+        .withColumn("close_prev", F.lag("close_1h", 1).over(w))  # offset = 1
         .withColumn("ret_1h", F.log(F.col("close_1h") / F.col("close_prev")))
         .withColumn("high_low_ratio", F.col("high_1h") / F.col("low_1h"))
         .drop("close_prev")
     )
 
+    # On enlève les lignes où on ne peut pas calculer (première ligne, etc.)
     return agg.dropna()
 
 
