@@ -12,7 +12,7 @@ from pathlib import Path
 from config import load_config
 from spark_utils import create_spark
 from ingestion import load_price_data, load_blockchain_data
-from features import build_price_features, join_blockchain_features, add_labels
+from features import build_price_features, join_blockchain_features, add_labels, build_all_features
 from modeling import build_train_test, train_and_evaluate
 
 
@@ -48,7 +48,7 @@ def main() -> None:
     df_feat = join_blockchain_features(df_price_feat, df_blockchain, cfg)
     df_labeled = add_labels(df_feat, cfg)
 
-    # Train/test split
+    # ✅ Train/test split sur le DF avec le label
     train_df, test_df = build_train_test(df_labeled, cfg)
 
     # Train model and evaluate
@@ -56,6 +56,7 @@ def main() -> None:
     print("Metrics:", metrics)
 
     spark.stop()
+
 
 
 if __name__ == "__main__":

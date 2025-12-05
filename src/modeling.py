@@ -8,15 +8,16 @@ complex models (e.g. random forests, gradient boosting) via the
 configuration file.
 """
 
-from typing import Dict
+from typing import Dict, Any 
 from pathlib import Path
 import csv
+import os 
 
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 from pyspark.ml import Pipeline
 from pyspark.ml.feature import VectorAssembler, StandardScaler
-from pyspark.ml.classification import LogisticRegression
+from pyspark.ml.classification import LogisticRegression, GBTClassifier
 from pyspark.ml.evaluation import BinaryClassificationEvaluator, MulticlassClassificationEvaluator
 
 
@@ -38,7 +39,7 @@ def build_train_test(df_labeled: DataFrame, cfg: Dict[str, any]):
     return train_df, test_df
 
 
-def train_and_evaluate(train_df: DataFrame, test_df: DataFrame, cfg: Dict[str, any]) -> Dict[str, float]:
+def train_and_evaluate(train_df: DataFrame, test_df: DataFrame, cfg: Dict[str, Any]) -> Dict[str, float]:
     """Train a logistic regression classifier and evaluate its performance.
 
     Builds a simple ML pipeline composed of a ``VectorAssembler``,
@@ -54,52 +55,103 @@ def train_and_evaluate(train_df: DataFrame, test_df: DataFrame, cfg: Dict[str, a
     Returns:
         A dictionary of metric names and values.
     """
+    # --- Features -----------------------------------------------------------
     feat_cfg = cfg["features"]
-    input_cols = feat_cfg.get("price_features", []) + (
-        feat_cfg.get("blockchain_features", []) if feat_cfg.get("use_blockchain") else []
+    use_blockchain = feat_cfg.get("use_blockchain", False)
+    price_features = feat_cfg.get("price_features", [])
+    blockchain_features = feat_cfg.get("blockchain_features", [])
+
+    feature_cols = list(price_features)
+    if use_blockchain:
+        feature_cols += blockchain_features
+
+    # on ne garde que les features qui existent vraiment dans le DataFrame
+    feature_cols = [c for c in feature_cols if c in train_df.columns]
+
+    # label (créé dans add_labels, généralement "label")
+    label_col = cfg.get("label_col", "label")
+
+    # --- Config modèle ------------------------------------------------------
+    model_cfg = cfg.get("model", {})
+    model_type = model_cfg.get("type", "logistic_regression")
+    params = model_cfg.get("params", {})
+
+    output_cfg = cfg.get("output", {})
+    output_dir = output_cfg.get("path", "output")
+    os.makedirs(output_dir, exist_ok=True)
+
+    # --- Nettoyage NA -------------------------------------------------------
+    train_df = train_df.dropna(subset=feature_cols + [label_col])
+    test_df = test_df.dropna(subset=feature_cols + [label_col])
+
+    # --- Pipeline ML --------------------------------------------------------
+    assembler = VectorAssembler(
+        inputCols=feature_cols,
+        outputCol="features_raw",
     )
 
-    assembler = VectorAssembler(inputCols=input_cols, outputCol="features_raw")
-    scaler = StandardScaler(inputCol="features_raw", outputCol="features", withMean=True, withStd=True)
-    lr_params = cfg["model"].get("params", {})
-    lr = LogisticRegression(featuresCol="features", labelCol="label_up", **lr_params)
+    scaler = StandardScaler(
+        inputCol="features_raw",
+        outputCol="features",
+        withStd=True,
+        withMean=True,
+    )
 
-    pipeline = Pipeline(stages=[assembler, scaler, lr])
+    if model_type == "logistic_regression":
+        clf = LogisticRegression(
+            labelCol=label_col,
+            featuresCol="features",
+            maxIter=params.get("maxIter", 50),
+            regParam=params.get("regParam", 0.0),
+            elasticNetParam=params.get("elasticNetParam", 0.0),
+        )
+    elif model_type == "gbt":
+        clf = GBTClassifier(
+            labelCol=label_col,
+            featuresCol="features",
+            maxDepth=params.get("maxDepth", 5),
+            maxIter=params.get("maxIter", 80),
+            stepSize=params.get("stepSize", 0.1),
+            seed=params.get("seed", 42),
+        )
+    else:
+        raise ValueError(f"Unknown model type: {model_type}")
+
+    pipeline = Pipeline(stages=[assembler, scaler, clf])
+
+    # --- Entraînement -------------------------------------------------------
     model = pipeline.fit(train_df)
 
+    # --- Prédiction & métriques --------------------------------------------
     preds = model.transform(test_df)
 
-    # Evaluate AUC ROC
-    bc_eval = BinaryClassificationEvaluator(
-        labelCol="label_up", rawPredictionCol="rawPrediction", metricName="areaUnderROC"
+    evaluator_auc = BinaryClassificationEvaluator(
+        labelCol=label_col,
+        rawPredictionCol="rawPrediction",
+        metricName="areaUnderROC",
     )
-    auc = bc_eval.evaluate(preds)
+    auc = evaluator_auc.evaluate(preds)
 
-    # Evaluate accuracy
-    acc_eval = MulticlassClassificationEvaluator(
-        labelCol="label_up", predictionCol="prediction", metricName="accuracy"
-    )
-    acc = acc_eval.evaluate(preds)
+    correct = preds.filter(F.col("prediction") == F.col(label_col)).count()
+    total = preds.count()
+    acc = correct / total if total > 0 else 0.0
 
     metrics = {
         "auc_roc": float(auc),
         "accuracy": float(acc),
-        "n_train": train_df.count(),
-        "n_test": test_df.count(),
+        "n_train": int(train_df.count()),
+        "n_test": int(test_df.count()),
     }
 
-    # Persist metrics to CSV
-    metrics_path = Path(cfg["output"]["metrics_csv"])
-    metrics_path.parent.mkdir(parents=True, exist_ok=True)
-    with metrics_path.open("w", newline="", encoding="utf-8") as fh:
-        writer = csv.writer(fh)
-        writer.writerow(["metric", "value"])
-        for key, value in metrics.items():
-            writer.writerow([key, value])
+    # --- Sauvegarde modèle & métriques -------------------------------------
+    model_dir = os.path.join(output_dir, "models")
+    os.makedirs(model_dir, exist_ok=True)
+    model.write().overwrite().save(os.path.join(model_dir, f"{model_type}_pipeline"))
 
-    # Save the trained model
-    models_dir = Path(cfg["output"]["models_dir"])
-    models_dir.mkdir(parents=True, exist_ok=True)
-    model.save(str(models_dir / "lr_price_baseline"))
+    metrics_path = os.path.join(output_dir, "metrics.csv")
+    with open(metrics_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(metrics.keys()))
+        writer.writeheader()
+        writer.writerow(metrics)
 
     return metrics

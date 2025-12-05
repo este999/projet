@@ -5,37 +5,38 @@ from pyspark.sql import functions as F
 
 
 def load_price_data(spark: SparkSession, cfg: Dict[str, Any]) -> DataFrame:
-    """Load historical price candles from CSV into a canonical schema.
+    """Load historical price candles from CSV.
 
-    Returns a DataFrame with:
-    - ts_raw (timestamp)
-    - open, high, low, close, volume (double)
+    The data is filtered to the date range specified in the config and
+    columns are renamed to a standard schema (open, high, low, close,
+    volume).
+
+    Returns:
+        A Spark DataFrame with a timestamp column named ``ts_raw`` and
+        columns ``open``, ``high``, ``low``, ``close`` and ``volume``.
     """
     data_cfg = cfg["data"]
     path = data_cfg["price_path"]
 
-    # Lecture brute du CSV (toutes les colonnes arrivent en string)
+    # Read raw CSV with header. Types are strings by default.
     df = (
         spark.read
         .option("header", True)
         .csv(path)
     )
 
+    # Colonne de timestamp (dans ton YAML: "Open time")
     ts_col = data_cfg["price_timestamp_col"]
-    # True si la colonne est un Unix timestamp en secondes (ex: "1562352720.0")
-    ts_is_unix = data_cfg.get("timestamp_is_unix", True)
 
-    if ts_is_unix:
-        # "1453430580.0" -> cast en double -> from_unixtime -> timestamp
-        df = df.withColumn(
-            "ts_raw",
-            F.from_unixtime(F.col(ts_col).cast("double")).cast("timestamp")
-        )
-    else:
-        # Cas où la colonne est déjà une string de type "YYYY-MM-DD HH:MM:SS"
-        df = df.withColumn("ts_raw", F.to_timestamp(F.col(ts_col)))
+    # Ici : on considère que la colonne contient déjà une date texte
+    # style "2018-01-01 00:00:00.000000 ".
+    # -> on trim et on parse directement en timestamp.
+    df = df.withColumn(
+        "ts_raw",
+        F.to_timestamp(F.trim(F.col(ts_col)))
+    )
 
-    # Filtre sur la période
+    # Filtre sur la plage de dates si défini dans le YAML
     start = data_cfg.get("start_date")
     end = data_cfg.get("end_date")
     if start:
@@ -43,7 +44,7 @@ def load_price_data(spark: SparkSession, cfg: Dict[str, Any]) -> DataFrame:
     if end:
         df = df.filter(F.col("ts_raw") <= F.lit(end))
 
-    # Renommage en schéma canonique
+    # Canonicalisation des colonnes de prix
     df = (
         df
         .withColumnRenamed(data_cfg["price_open_col"], "open")
@@ -57,17 +58,58 @@ def load_price_data(spark: SparkSession, cfg: Dict[str, Any]) -> DataFrame:
     return df
 
 
-def load_blockchain_data(spark: SparkSession, cfg: Dict[str, Any]) -> Optional[DataFrame]:
-    """Load blockchain-derived features if a path is provided.
-
-    Returns None when no blockchain dataset is configured.
+def load_blockchain_data(
+    spark: SparkSession,
+    cfg: Dict[str, Any]
+) -> Optional[DataFrame]:
     """
-    data_cfg = cfg.get("data", {})
+    Charge les métriques on-chain (ex. tx_count, volume on-chain) et
+    les agrège à l'heure pour matcher les bougies prix.
+    """
+    data_cfg = cfg["data"]
     path = data_cfg.get("blockchain_path")
-
-    # Si tu n'as pas encore de dataset blockchain, laisse blockchain_path: null dans le YAML
     if not path:
         return None
 
-    df = spark.read.parquet(path)
-    return df
+    # Lecture générique CSV/parquet
+    if path.lower().endswith(".parquet"):
+        df = spark.read.parquet(path)
+    else:
+        df = (
+            spark.read
+            .option("header", True)
+            .csv(path)
+        )
+
+    # Colonne timestamp de la blockchain
+    ts_col = data_cfg.get("blockchain_timestamp_col", "timestamp")
+
+    # Parsing du timestamp (unix ou datetime)
+    if data_cfg.get("timestamp_is_unix", False):
+        df = df.withColumn(
+            "ts_raw",
+            F.from_unixtime(F.col(ts_col).cast("double"), "yyyy-MM-dd HH:mm:ss").cast("timestamp")
+        )
+    else:
+        df = df.withColumn("ts_raw", F.col(ts_col).cast("timestamp"))
+
+    # Filtre sur la même période que les prix
+    start = data_cfg.get("start_date")
+    end = data_cfg.get("end_date")
+    if start:
+        df = df.filter(F.col("ts_raw") >= F.lit(start))
+    if end:
+        df = df.filter(F.col("ts_raw") <= F.lit(end))
+
+    # Agrégation horaire
+    df = df.withColumn("ts_hour", F.date_trunc("hour", F.col("ts_raw")))
+
+    metric_cols = [c for c in df.columns if c not in {ts_col, "ts_raw", "ts_hour"}]
+
+    df_hourly = (
+        df.groupBy("ts_hour")
+          .agg(*[F.avg(c).alias(c) for c in metric_cols])
+          .orderBy("ts_hour")
+    )
+
+    return df_hourly

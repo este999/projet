@@ -8,38 +8,35 @@ creates binary labels for next‑horizon price direction.
 
 from typing import Dict, Optional, Any
 
-from pyspark.sql import DataFrame, Window, functions as F
+from pyspark.sql import DataFrame, functions as F
+from pyspark.sql.window import Window
 
 
 def build_price_features(df_prices: DataFrame, cfg: Dict[str, Any]) -> DataFrame:
-    freq = cfg["etl"]["resample_freq"]  # e.g. "1 hour"
+    """
+    Construit les features à partir des prix :
+    - agrégation en bougies 1h
+    - volatilité intra-heure
+    - rendement futur 1h (ret_1h)
+    - high_low_ratio
+    - lags + moyennes mobiles + vol glissante
+    """
 
-    # 🔹 1. Cast des colonnes numériques en double
-    df_cast = (
+    # 1) Agrégation en 1h
+    hourly = (
         df_prices
-        .withColumn("open", F.col("open").cast("double"))
-        .withColumn("high", F.col("high").cast("double"))
-        .withColumn("low", F.col("low").cast("double"))
-        .withColumn("close", F.col("close").cast("double"))
-        .withColumn("volume", F.col("volume").cast("double"))
-    )
-
-    # 🔹 2. Fenêtre horaire
-    df = df_cast.withColumn("ts_hour_window", F.window("ts_raw", freq))
-
-    # 🔹 3. Agrégation à l’heure
-    agg = (
-        df.groupBy("ts_hour_window")
+        .withColumn("ts_hour_window", F.window("ts_raw", "1 hour"))
+        .groupBy("ts_hour_window")
         .agg(
-            F.first("open").alias("open_1h"),
-            F.last("close").alias("close_1h"),
-            F.max("high").alias("high_1h"),
-            F.min("low").alias("low_1h"),
-            F.sum("volume").alias("vol_1h"),
-            F.stddev_pop("close").alias("volatility_1h"),
+            F.first(F.col("open").cast("double")).alias("open_1h"),
+            F.last(F.col("close").cast("double")).alias("close_1h"),
+            F.max(F.col("high").cast("double")).alias("high_1h"),
+            F.min(F.col("low").cast("double")).alias("low_1h"),
+            F.sum(F.col("volume").cast("double")).alias("vol_1h"),
+            F.stddev_pop(F.col("close").cast("double")).alias("volatility_1h"),
         )
         .select(
-            F.col("ts_hour_window").start.alias("ts_hour"),
+            F.col("ts_hour_window").getField("start").alias("ts_hour"),
             "open_1h",
             "close_1h",
             "high_1h",
@@ -49,18 +46,41 @@ def build_price_features(df_prices: DataFrame, cfg: Dict[str, Any]) -> DataFrame
         )
     )
 
-    # 🔹 4. Ajout du retour 1h (log-return) et du ratio high/low
+    # 2) Fenêtres temporelles
     w = Window.orderBy("ts_hour")
-    agg = (
-        agg
-        .withColumn("close_prev", F.lag("close_1h", 1).over(w))  # offset = 1
-        .withColumn("ret_1h", F.log(F.col("close_1h") / F.col("close_prev")))
+    w_3h = w.rowsBetween(-2, 0)
+    w_12h = w.rowsBetween(-11, 0)
+    w_24h = w.rowsBetween(-23, 0)
+
+    # 3) Rendements + ratios + features dérivées
+       # 3) Rendements + ratios + features dérivées
+    feats = (
+        hourly
+        .withColumn("close_1h_d", F.col("close_1h").cast("double"))
+        # prix *passé* (t-1h)
+        .withColumn("close_prev", F.lag("close_1h_d", 1).over(w))
+        # rendement log passé : ln(P_t / P_{t-1})
+        .withColumn(
+            "ret_1h",
+            F.log(F.col("close_1h_d") / F.col("close_prev"))
+        )
+        # ratio high / low
         .withColumn("high_low_ratio", F.col("high_1h") / F.col("low_1h"))
-        .drop("close_prev")
+        # lags du rendement (info encore plus ancienne)
+        .withColumn("ret_1h_lag1", F.lag("ret_1h", 1).over(w))
+        .withColumn("ret_1h_lag2", F.lag("ret_1h", 2).over(w))
+        # moyennes mobiles de prix
+        .withColumn("ma_close_3h", F.avg("close_1h_d").over(w_3h))
+        .withColumn("ma_close_12h", F.avg("close_1h_d").over(w_12h))
+        # volatilité glissante sur 24h
+        .withColumn("vol_24h", F.stddev("close_1h_d").over(w_24h))
+        .drop("close_1h_d", "close_prev")
+        .orderBy("ts_hour")
     )
 
-    # On enlève les lignes où on ne peut pas calculer (première ligne, etc.)
-    return agg.dropna()
+
+    return hourly
+
 
 
 def join_blockchain_features(df_price_feat: DataFrame, df_blockchain: Optional[DataFrame], cfg: Dict[str, any]) -> DataFrame:
@@ -111,3 +131,27 @@ def add_labels(df_features: DataFrame, cfg: Dict[str, any]) -> DataFrame:
         F.when(F.col("return_future") > 0, F.lit(1)).otherwise(F.lit(0))
     )
     return df.dropna(subset=["close_future", "return_future"])
+
+def build_all_features(
+    df_prices: DataFrame,
+    df_blockchain: Optional[DataFrame],
+    cfg: Dict[str, Any]
+) -> DataFrame:
+    """
+    Construit les features de prix + (optionnel) blockchain,
+    puis ajoute le label.
+    """
+    df_price_feat = build_price_features(df_prices, cfg)
+
+    use_blockchain = cfg.get("features", {}).get("use_blockchain", False)
+
+    if use_blockchain and df_blockchain is not None:
+        df_feat = (
+            df_price_feat.alias("p")
+            .join(df_blockchain.alias("b"), on="ts_hour", how="left")
+        )
+    else:
+        df_feat = df_price_feat
+
+    df_labeled = build_label(df_feat, cfg)
+    return df_labeled

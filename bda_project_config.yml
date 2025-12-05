@@ -9,12 +9,12 @@ spark:
 
 data:
   # On ne prend que le 1-min pour l’instant
-  price_path: "data/prices/btcusd_1-min_data.csv"
+  price_path: "data/prices/btc_1h_data_2018_to_2025.csv"
 
   # Pas encore de dataset blockchain décodé => on désactive
   blockchain_path: null
 
-  price_timestamp_col: "Timestamp"
+  price_timestamp_col: "Open time"
   price_open_col: "Open"
   price_high_col: "High"
   price_low_col: "Low"
@@ -25,30 +25,38 @@ data:
   start_date: "2019-01-01"
   end_date: "2022-12-31"
 
-  timestamp_is_unix: true 
+  timestamp_is_unix: false
 
 etl:
   resample_freq: "1 hour"
   label_horizon_hours: 1
 
 features:
-  use_blockchain: false        # très important pour éviter le join sur un DF vide
+  use_blockchain: true        # très important pour éviter le join sur un DF vide
   price_features:
     - "ret_1h"
     - "vol_1h"
     - "volatility_1h"
     - "high_low_ratio"
+    - "ret_1h_lag1"
+    - "ret_1h_lag2"
+    - "ma_close_3h"
+    - "ma_close_12h"
+    - "vol_24h"
   blockchain_features:
     - "tx_count_hour"
     - "total_value_hour"
 
+label_col: "label_up"
 
 model:
-  type: "logistic_regression"
+  type: "gbt"
   params:
-    maxIter: 50
-    regParam: 0.0
-    elasticNetParam: 0.0
+    maxDepth: 5
+    maxIter: 80
+    stepSize: 0.1
+    seed: 42
+
 
 train:
   # End date of training period (inclusive)
