@@ -46,14 +46,6 @@ def train_and_evaluate(train_df: DataFrame, test_df: DataFrame, cfg: Dict[str, A
     ``StandardScaler`` and ``LogisticRegression`` model. Predictions are
     scored using AUC ROC and accuracy metrics. Metrics are saved to
     a CSV file, and the model is persisted to disk.
-
-    Args:
-        train_df: DataFrame used for training.
-        test_df: DataFrame used for testing.
-        cfg: Loaded configuration dictionary.
-
-    Returns:
-        A dictionary of metric names and values.
     """
     # --- Features -----------------------------------------------------------
     feat_cfg = cfg["features"]
@@ -61,6 +53,7 @@ def train_and_evaluate(train_df: DataFrame, test_df: DataFrame, cfg: Dict[str, A
     price_features = feat_cfg.get("price_features", [])
     blockchain_features = feat_cfg.get("blockchain_features", [])
 
+    # colonnes candidates
     feature_cols = list(price_features)
     if use_blockchain:
         feature_cols += blockchain_features
@@ -68,8 +61,14 @@ def train_and_evaluate(train_df: DataFrame, test_df: DataFrame, cfg: Dict[str, A
     # on ne garde que les features qui existent vraiment dans le DataFrame
     feature_cols = [c for c in feature_cols if c in train_df.columns]
 
-    # label (créé dans add_labels, généralement "label")
+    # label (créé dans add_labels, généralement "label" ou "label_up")
     label_col = cfg.get("label_col", "label")
+
+    # --- Séparation features prix / features blockchain ---------------------
+    # colonnes blockchain effectivement présentes parmi les features
+    bc_cols = [c for c in blockchain_features if c in feature_cols]
+    # colonnes "coeur" (prix) sur lesquelles on est strict pour les NA
+    core_cols = [c for c in feature_cols if c not in bc_cols]
 
     # --- Config modèle ------------------------------------------------------
     model_cfg = cfg.get("model", {})
@@ -81,8 +80,20 @@ def train_and_evaluate(train_df: DataFrame, test_df: DataFrame, cfg: Dict[str, A
     os.makedirs(output_dir, exist_ok=True)
 
     # --- Nettoyage NA -------------------------------------------------------
-    train_df = train_df.dropna(subset=feature_cols + [label_col])
-    test_df = test_df.dropna(subset=feature_cols + [label_col])
+    # 1) on drop uniquement si NA sur les features prix + label
+    subset_drop = core_cols + [label_col]
+    train_df = train_df.dropna(subset=subset_drop)
+    test_df = test_df.dropna(subset=subset_drop)
+
+    # 2) on remplace les NA des features blockchain (issues de la jointure) par 0
+    if bc_cols:
+        fill_vals = {c: 0.0 for c in bc_cols}
+        train_df = train_df.fillna(fill_vals)
+        test_df = test_df.fillna(fill_vals)
+
+    # (optionnel) petit debug :
+    # print("[DEBUG] n_train après nettoyage :", train_df.count())
+    # print("[DEBUG] n_test après nettoyage :", test_df.count())
 
     # --- Pipeline ML --------------------------------------------------------
     assembler = VectorAssembler(

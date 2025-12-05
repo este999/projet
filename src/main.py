@@ -48,6 +48,14 @@ def main() -> None:
     df_feat = join_blockchain_features(df_price_feat, df_blockchain, cfg)
     df_labeled = add_labels(df_feat, cfg)
 
+    print("Cols features :", df_feat.columns)
+
+    df_feat.select(
+    "ts_hour",
+    "tx_count_hour",
+    "total_value_hour"
+    ).orderBy("ts_hour").show(5)
+
     # ✅ Train/test split sur le DF avec le label
     train_df, test_df = build_train_test(df_labeled, cfg)
 

@@ -58,58 +58,51 @@ def load_price_data(spark: SparkSession, cfg: Dict[str, Any]) -> DataFrame:
     return df
 
 
-def load_blockchain_data(
-    spark: SparkSession,
-    cfg: Dict[str, Any]
-) -> Optional[DataFrame]:
+def load_blockchain_data(spark: SparkSession, cfg: Dict[str, Any]) -> Optional[DataFrame]:
     """
-    Charge les métriques on-chain (ex. tx_count, volume on-chain) et
-    les agrège à l'heure pour matcher les bougies prix.
+    Charge les features blockchain horaires depuis un parquet
+    et crée une colonne ts_hour alignée avec les prix.
     """
-    data_cfg = cfg["data"]
+    data_cfg = cfg.get("data", {})
     path = data_cfg.get("blockchain_path")
+
+    # Si pas de chemin configuré → pas de features blockchain
     if not path:
+        print("[INFO] Pas de blockchain_path dans la config → on saute la partie blockchain.")
         return None
 
-    # Lecture générique CSV/parquet
-    if path.lower().endswith(".parquet"):
-        df = spark.read.parquet(path)
-    else:
-        df = (
-            spark.read
-            .option("header", True)
-            .csv(path)
+    print(f"[INFO] Lecture des features blockchain depuis : {path}")
+    df = spark.read.parquet(path)
+
+    cols = df.columns
+    print(f"[INFO] Colonnes blockchain lues par Spark : {cols}")
+
+    # 1) Recherche de la colonne temporelle
+    #    On fait une détection *insensible à la casse* et on inclut 'timestamp'
+    lower_map = {c.lower(): c for c in cols}
+    candidates = ["ts_hour", "timestamp", "ts", "time", "block_time", "block_timestamp"]
+
+    ts_col = None
+    for cand in candidates:
+        if cand in lower_map:
+            ts_col = lower_map[cand]
+            break
+
+    if ts_col is None:
+        # Si vraiment rien trouvé, on lève une erreur explicite
+        raise ValueError(
+            f"Impossible de trouver une colonne temporelle dans le parquet blockchain. "
+            f"Colonnes trouvées : {cols}"
         )
 
-    # Colonne timestamp de la blockchain
-    ts_col = data_cfg.get("blockchain_timestamp_col", "timestamp")
+    print(f"[INFO] Colonne temporelle détectée pour la blockchain : {ts_col}")
 
-    # Parsing du timestamp (unix ou datetime)
-    if data_cfg.get("timestamp_is_unix", False):
-        df = df.withColumn(
-            "ts_raw",
-            F.from_unixtime(F.col(ts_col).cast("double"), "yyyy-MM-dd HH:mm:ss").cast("timestamp")
-        )
-    else:
-        df = df.withColumn("ts_raw", F.col(ts_col).cast("timestamp"))
+    # 2) On normalise en timestamp Spark et on tronque à l'heure
+    df = df.withColumn("ts_hour", F.date_trunc("hour", F.col(ts_col).cast("timestamp")))
 
-    # Filtre sur la même période que les prix
-    start = data_cfg.get("start_date")
-    end = data_cfg.get("end_date")
-    if start:
-        df = df.filter(F.col("ts_raw") >= F.lit(start))
-    if end:
-        df = df.filter(F.col("ts_raw") <= F.lit(end))
+    # 3) On met ts_hour en premier pour le join avec les features prix
+    other_cols = [c for c in cols if c != ts_col]
+    ordered_cols = ["ts_hour"] + other_cols
+    df = df.select(*ordered_cols)
 
-    # Agrégation horaire
-    df = df.withColumn("ts_hour", F.date_trunc("hour", F.col("ts_raw")))
-
-    metric_cols = [c for c in df.columns if c not in {ts_col, "ts_raw", "ts_hour"}]
-
-    df_hourly = (
-        df.groupBy("ts_hour")
-          .agg(*[F.avg(c).alias(c) for c in metric_cols])
-          .orderBy("ts_hour")
-    )
-
-    return df_hourly
+    return df

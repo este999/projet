@@ -126,9 +126,14 @@ def add_labels(df_features: DataFrame, cfg: Dict[str, any]) -> DataFrame:
         "return_future",
         (F.col("close_future") - F.col("close_1h")) / F.col("close_1h")
     )
+
+    # Seuil de 0.1 % pour considérer un "vrai" mouvement
+    THRESH = 0.001  # 0.1%
+
+
     df = df.withColumn(
         "label_up",
-        F.when(F.col("return_future") > 0, F.lit(1)).otherwise(F.lit(0))
+        F.when(F.col("return_future") > THRESH, F.lit(1)).otherwise(F.lit(0))
     )
     return df.dropna(subset=["close_future", "return_future"])
 

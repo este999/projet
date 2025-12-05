@@ -12,7 +12,7 @@ data:
   price_path: "data/prices/btc_1h_data_2018_to_2025.csv"
 
   # Pas encore de dataset blockchain décodé => on désactive
-  blockchain_path: null
+  blockchain_path: "data/blockchain/btc_blockchain_hourly.parquet"
 
   price_timestamp_col: "Open time"
   price_open_col: "Open"
@@ -29,7 +29,7 @@ data:
 
 etl:
   resample_freq: "1 hour"
-  label_horizon_hours: 1
+  label_horizon_hours: 4
 
 features:
   use_blockchain: true        # très important pour éviter le join sur un DF vide
@@ -50,12 +50,13 @@ features:
 label_col: "label_up"
 
 model:
-  type: "gbt"
+  type: gbt
   params:
     maxDepth: 5
-    maxIter: 80
+    maxIter: 50
     stepSize: 0.1
     seed: 42
+
 
 
 train:
