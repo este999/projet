@@ -1,0 +1,278 @@
+== Physical Plan ==
+
+AdaptiveSparkPlan (25)
+
++- Project (24)
+
+   +- Project (23)
+
+      +- Filter (22)
+
+         +- Window (21)
+
+            +- Project (20)
+
+               +- BroadcastHashJoin LeftOuter BuildRight (19)
+
+                  :- Project (14)
+
+                  :  +- Window (13)
+
+                  :     +- Project (12)
+
+                  :        +- Window (11)
+
+                  :           +- Sort (10)
+
+                  :              +- Exchange (9)
+
+                  :                 +- Project (8)
+
+                  :                    +- HashAggregate (7)
+
+                  :                       +- Exchange (6)
+
+                  :                          +- HashAggregate (5)
+
+                  :                             +- Project (4)
+
+                  :                                +- Project (3)
+
+                  :                                   +- Filter (2)
+
+                  :                                      +- Scan csv  (1)
+
+                  +- BroadcastExchange (18)
+
+                     +- Project (17)
+
+                        +- Filter (16)
+
+                           +- Scan parquet  (15)
+
+
+
+
+
+(1) Scan csv
+
+Output [6]: [Open time#17, Open#18, High#19, Low#20, Close#21, Volume#22]
+
+Batched: false
+
+Location: InMemoryFileIndex [file:/mnt/c/Users/estei/projet/data/prices/btc_1h_data_2018_to_2025.csv]
+
+ReadSchema: struct<Open time:string,Open:string,High:string,Low:string,Close:string,Volume:string>
+
+
+
+(2) Filter
+
+Input [6]: [Open time#17, Open#18, High#19, Low#20, Close#21, Volume#22]
+
+Condition : ((cast(trim(Open time#17, None) as timestamp) >= 2018-01-01 00:00:00) AND (cast(trim(Open time#17, None) as timestamp) <= 2022-12-31 00:00:00))
+
+
+
+(3) Project
+
+Output [6]: [Open#18, High#19, Low#20, Close#21, Volume#22, cast(trim(Open time#17, None) as timestamp) AS ts_raw#30]
+
+Input [6]: [Open time#17, Open#18, High#19, Low#20, Close#21, Volume#22]
+
+
+
+(4) Project
+
+Output [6]: [cast(Open#18 as double) AS open#31, cast(High#19 as double) AS high#32, cast(Low#20 as double) AS low#33, cast(Close#21 as double) AS close#34, cast(Volume#22 as double) AS volume#35, named_struct(start, knownnullable(precisetimestampconversion(((precisetimestampconversion(ts_raw#30, TimestampType, LongType) - CASE WHEN (((precisetimestampconversion(ts_raw#30, TimestampType, LongType) - 0) % 3600000000) < 0) THEN (((precisetimestampconversion(ts_raw#30, TimestampType, LongType) - 0) % 3600000000) + 3600000000) ELSE ((precisetimestampconversion(ts_raw#30, TimestampType, LongType) - 0) % 3600000000) END) - 0), LongType, TimestampType)), end, knownnullable(precisetimestampconversion((((precisetimestampconversion(ts_raw#30, TimestampType, LongType) - CASE WHEN (((precisetimestampconversion(ts_raw#30, TimestampType, LongType) - 0) % 3600000000) < 0) THEN (((precisetimestampconversion(ts_raw#30, TimestampType, LongType) - 0) % 3600000000) + 3600000000) ELSE ((precisetimestampconversion(ts_raw#30, TimestampType, LongType) - 0) % 3600000000) END) - 0) + 3600000000), LongType, TimestampType))) AS ts_hour_window#42]
+
+Input [6]: [Open#18, High#19, Low#20, Close#21, Volume#22, ts_raw#30]
+
+
+
+(5) HashAggregate
+
+Input [6]: [open#31, high#32, low#33, close#34, volume#35, ts_hour_window#42]
+
+Keys [1]: [ts_hour_window#42]
+
+Functions [6]: [partial_first(open#31, false), partial_last(close#34, false), partial_max(high#32), partial_min(low#33), partial_sum(volume#35), partial_stddev_pop(close#34)]
+
+Aggregate Attributes [10]: [first#1583, valueSet#1584, last#1585, valueSet#1586, max#1587, min#1588, sum#1589, n#1567, avg#1568, m2#1569]
+
+Results [11]: [ts_hour_window#42, first#1590, valueSet#1591, last#1592, valueSet#1593, max#1594, min#1595, sum#1596, n#1572, avg#1573, m2#1574]
+
+
+
+(6) Exchange
+
+Input [11]: [ts_hour_window#42, first#1590, valueSet#1591, last#1592, valueSet#1593, max#1594, min#1595, sum#1596, n#1572, avg#1573, m2#1574]
+
+Arguments: hashpartitioning(ts_hour_window#42, 8), ENSURE_REQUIREMENTS, [plan_id=4459]
+
+
+
+(7) HashAggregate
+
+Input [11]: [ts_hour_window#42, first#1590, valueSet#1591, last#1592, valueSet#1593, max#1594, min#1595, sum#1596, n#1572, avg#1573, m2#1574]
+
+Keys [1]: [ts_hour_window#42]
+
+Functions [6]: [first(open#31, false), last(close#34, false), max(high#32), min(low#33), sum(volume#35), stddev_pop(close#34)]
+
+Aggregate Attributes [6]: [first(open#31)()#57, last(close#34)()#58, max(high#32)#59, min(low#33)#60, sum(volume#35)#61, stddev_pop(close#34)#70]
+
+Results [7]: [ts_hour_window#42.start AS ts_hour#87, first(open#31)()#57 AS open_1h#44, last(close#34)()#58 AS close_1h#45, max(high#32)#59 AS high_1h#46, min(low#33)#60 AS low_1h#47, sum(volume#35)#61 AS vol_1h#48, stddev_pop(close#34)#70 AS volatility_1h#49]
+
+
+
+(8) Project
+
+Output [8]: [ts_hour#87, open_1h#44, close_1h#45, high_1h#46, low_1h#47, vol_1h#48, volatility_1h#49, close_1h#45 AS close_1h_d#88]
+
+Input [7]: [ts_hour#87, open_1h#44, close_1h#45, high_1h#46, low_1h#47, vol_1h#48, volatility_1h#49]
+
+
+
+(9) Exchange
+
+Input [8]: [ts_hour#87, open_1h#44, close_1h#45, high_1h#46, low_1h#47, vol_1h#48, volatility_1h#49, close_1h_d#88]
+
+Arguments: SinglePartition, ENSURE_REQUIREMENTS, [plan_id=4463]
+
+
+
+(10) Sort
+
+Input [8]: [ts_hour#87, open_1h#44, close_1h#45, high_1h#46, low_1h#47, vol_1h#48, volatility_1h#49, close_1h_d#88]
+
+Arguments: [ts_hour#87 ASC NULLS FIRST], false, 0
+
+
+
+(11) Window
+
+Input [8]: [ts_hour#87, open_1h#44, close_1h#45, high_1h#46, low_1h#47, vol_1h#48, volatility_1h#49, close_1h_d#88]
+
+Arguments: [lag(close_1h_d#88, -1, null) windowspecdefinition(ts_hour#87 ASC NULLS FIRST, specifiedwindowframe(RowFrame, -1, -1)) AS close_prev#89], [ts_hour#87 ASC NULLS FIRST]
+
+
+
+(12) Project
+
+Output [10]: [ts_hour#87, open_1h#44, close_1h#45, high_1h#46, low_1h#47, vol_1h#48, volatility_1h#49, close_1h_d#88, ln((close_1h_d#88 / close_prev#89)) AS ret_1h#90, (high_1h#46 / low_1h#47) AS high_low_ratio#91]
+
+Input [9]: [ts_hour#87, open_1h#44, close_1h#45, high_1h#46, low_1h#47, vol_1h#48, volatility_1h#49, close_1h_d#88, close_prev#89]
+
+
+
+(13) Window
+
+Input [10]: [ts_hour#87, open_1h#44, close_1h#45, high_1h#46, low_1h#47, vol_1h#48, volatility_1h#49, close_1h_d#88, ret_1h#90, high_low_ratio#91]
+
+Arguments: [lag(ret_1h#90, -1, null) windowspecdefinition(ts_hour#87 ASC NULLS FIRST, specifiedwindowframe(RowFrame, -1, -1)) AS ret_1h_lag1#92, lag(ret_1h#90, -2, null) windowspecdefinition(ts_hour#87 ASC NULLS FIRST, specifiedwindowframe(RowFrame, -2, -2)) AS ret_1h_lag2#93, avg(close_1h_d#88) windowspecdefinition(ts_hour#87 ASC NULLS FIRST, specifiedwindowframe(RowFrame, -2, currentrow$())) AS ma_close_3h#94, avg(close_1h_d#88) windowspecdefinition(ts_hour#87 ASC NULLS FIRST, specifiedwindowframe(RowFrame, -11, currentrow$())) AS ma_close_12h#96, stddev(close_1h_d#88) windowspecdefinition(ts_hour#87 ASC NULLS FIRST, specifiedwindowframe(RowFrame, -23, currentrow$())) AS vol_24h#98], [ts_hour#87 ASC NULLS FIRST]
+
+
+
+(14) Project
+
+Output [14]: [ts_hour#87, open_1h#44, close_1h#45, high_1h#46, low_1h#47, vol_1h#48, volatility_1h#49, ret_1h#90, high_low_ratio#91, ret_1h_lag1#92, ret_1h_lag2#93, ma_close_3h#94, ma_close_12h#96, vol_24h#98]
+
+Input [15]: [ts_hour#87, open_1h#44, close_1h#45, high_1h#46, low_1h#47, vol_1h#48, volatility_1h#49, close_1h_d#88, ret_1h#90, high_low_ratio#91, ret_1h_lag1#92, ret_1h_lag2#93, ma_close_3h#94, ma_close_12h#96, vol_24h#98]
+
+
+
+(15) Scan parquet
+
+Output [4]: [timestamp#36, total_value_hour#37, tx_count_hour#38, block_count#39L]
+
+Batched: true
+
+Location: InMemoryFileIndex [file:/mnt/c/Users/estei/projet/data/blockchain/btc_blockchain_hourly_shifted.parquet]
+
+ReadSchema: struct<timestamp:string,total_value_hour:double,tx_count_hour:double,block_count:bigint>
+
+
+
+(16) Filter
+
+Input [4]: [timestamp#36, total_value_hour#37, tx_count_hour#38, block_count#39L]
+
+Condition : isnotnull(date_trunc(hour, cast(timestamp#36 as timestamp), Some(Europe/Paris)))
+
+
+
+(17) Project
+
+Output [5]: [timestamp#36, total_value_hour#37, tx_count_hour#38, block_count#39L, date_trunc(hour, cast(timestamp#36 as timestamp), Some(Europe/Paris)) AS ts_hour#41]
+
+Input [4]: [timestamp#36, total_value_hour#37, tx_count_hour#38, block_count#39L]
+
+
+
+(18) BroadcastExchange
+
+Input [5]: [timestamp#36, total_value_hour#37, tx_count_hour#38, block_count#39L, ts_hour#41]
+
+Arguments: HashedRelationBroadcastMode(List(input[4, timestamp, true]),false), [plan_id=4470]
+
+
+
+(19) BroadcastHashJoin
+
+Left keys [1]: [ts_hour#87]
+
+Right keys [1]: [ts_hour#41]
+
+Join type: LeftOuter
+
+Join condition: None
+
+
+
+(20) Project
+
+Output [18]: [ts_hour#87, open_1h#44, close_1h#45, high_1h#46, low_1h#47, vol_1h#48, volatility_1h#49, ret_1h#90, high_low_ratio#91, ret_1h_lag1#92, ret_1h_lag2#93, ma_close_3h#94, ma_close_12h#96, vol_24h#98, timestamp#36, total_value_hour#37, tx_count_hour#38, block_count#39L]
+
+Input [19]: [ts_hour#87, open_1h#44, close_1h#45, high_1h#46, low_1h#47, vol_1h#48, volatility_1h#49, ret_1h#90, high_low_ratio#91, ret_1h_lag1#92, ret_1h_lag2#93, ma_close_3h#94, ma_close_12h#96, vol_24h#98, timestamp#36, total_value_hour#37, tx_count_hour#38, block_count#39L, ts_hour#41]
+
+
+
+(21) Window
+
+Input [18]: [ts_hour#87, open_1h#44, close_1h#45, high_1h#46, low_1h#47, vol_1h#48, volatility_1h#49, ret_1h#90, high_low_ratio#91, ret_1h_lag1#92, ret_1h_lag2#93, ma_close_3h#94, ma_close_12h#96, vol_24h#98, timestamp#36, total_value_hour#37, tx_count_hour#38, block_count#39L]
+
+Arguments: [lead(close_1h#45, 1, null) windowspecdefinition(ts_hour#87 ASC NULLS FIRST, specifiedwindowframe(RowFrame, 1, 1)) AS close_future#108], [ts_hour#87 ASC NULLS FIRST]
+
+
+
+(22) Filter
+
+Input [19]: [ts_hour#87, open_1h#44, close_1h#45, high_1h#46, low_1h#47, vol_1h#48, volatility_1h#49, ret_1h#90, high_low_ratio#91, ret_1h_lag1#92, ret_1h_lag2#93, ma_close_3h#94, ma_close_12h#96, vol_24h#98, timestamp#36, total_value_hour#37, tx_count_hour#38, block_count#39L, close_future#108]
+
+Condition : atleastnnonnulls(2, close_future#108, ((close_future#108 - close_1h#45) / close_1h#45))
+
+
+
+(23) Project
+
+Output [20]: [ts_hour#87, open_1h#44, close_1h#45, high_1h#46, low_1h#47, vol_1h#48, volatility_1h#49, ret_1h#90, high_low_ratio#91, ret_1h_lag1#92, ret_1h_lag2#93, ma_close_3h#94, ma_close_12h#96, vol_24h#98, timestamp#36, total_value_hour#37, tx_count_hour#38, block_count#39L, close_future#108, ((close_future#108 - close_1h#45) / close_1h#45) AS return_future#109]
+
+Input [19]: [ts_hour#87, open_1h#44, close_1h#45, high_1h#46, low_1h#47, vol_1h#48, volatility_1h#49, ret_1h#90, high_low_ratio#91, ret_1h_lag1#92, ret_1h_lag2#93, ma_close_3h#94, ma_close_12h#96, vol_24h#98, timestamp#36, total_value_hour#37, tx_count_hour#38, block_count#39L, close_future#108]
+
+
+
+(24) Project
+
+Output [21]: [ts_hour#87, open_1h#44, close_1h#45, high_1h#46, low_1h#47, vol_1h#48, volatility_1h#49, ret_1h#90, high_low_ratio#91, ret_1h_lag1#92, ret_1h_lag2#93, ma_close_3h#94, ma_close_12h#96, vol_24h#98, timestamp#36, total_value_hour#37, tx_count_hour#38, block_count#39L, close_future#108, return_future#109, CASE WHEN (return_future#109 > 0.001) THEN 1 ELSE 0 END AS label_up#110]
+
+Input [20]: [ts_hour#87, open_1h#44, close_1h#45, high_1h#46, low_1h#47, vol_1h#48, volatility_1h#49, ret_1h#90, high_low_ratio#91, ret_1h_lag1#92, ret_1h_lag2#93, ma_close_3h#94, ma_close_12h#96, vol_24h#98, timestamp#36, total_value_hour#37, tx_count_hour#38, block_count#39L, close_future#108, return_future#109]
+
+
+
+(25) AdaptiveSparkPlan
+
+Output [21]: [ts_hour#87, open_1h#44, close_1h#45, high_1h#46, low_1h#47, vol_1h#48, volatility_1h#49, ret_1h#90, high_low_ratio#91, ret_1h_lag1#92, ret_1h_lag2#93, ma_close_3h#94, ma_close_12h#96, vol_24h#98, timestamp#36, total_value_hour#37, tx_count_hour#38, block_count#39L, close_future#108, return_future#109, label_up#110]
+
+Arguments: isFinalPlan=false
+

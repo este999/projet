@@ -1,2 +1,3 @@
 # Ignorer les dossiers de données
 data/
+!data/prices/btc_1h_data_2018_to_2025.csv

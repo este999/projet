@@ -1,50 +1,69 @@
-# BTC Price Direction Prediction
+# Bitcoin Price Direction Prediction (BDA Project)
 
-This repository contains an end‑to‑end PySpark pipeline to predict the
-short‑term direction of Bitcoin’s price using market data and (optionally)
-blockchain‑derived features. It is designed to satisfy the final project
-requirements for the ESIEE Big Data Analytics course.
+**Authors:** Esteban Nabonne & Hadrien Dejonghe  
+**Course:** Big Data Analytics - ESIEE 2025  
 
-## Structure
+An end-to-end PySpark pipeline to predict Bitcoin price movements using market data and blockchain activity proxies.
 
-```
-project-final/
-├── data/                 # Input datasets
-│   ├── prices/           # Kaggle CSVs with 1‑minute candles
-│   ├── blocks/           # Raw blk*.dat files or a decoded Parquet
-│   └── processed/        # Intermediate Parquet outputs
-├── src/                  # PySpark source code
-│   ├── config.py         # YAML config loader
-│   ├── spark_utils.py    # Spark session builder
-│   ├── ingestion.py      # Functions to load price & blockchain data
-│   ├── features.py       # Feature engineering routines
-│   ├── modeling.py       # Model training & evaluation
-│   └── main.py           # Pipeline orchestrator
-├── output/               # Generated metrics, models and logs
-├── evidence/             # Plan explanations and Spark UI screenshots
-├── bda_project_config.yml # Central configuration file
-├── BDA_Project_Report.md  # Project report template
-└── run_local.sh           # Convenience script to run locally
-```
+---
 
-## Running the pipeline
+## 🚀 Quick Start (Reproducibility)
 
-To run the pipeline on your machine, ensure you have installed the
-necessary dependencies (Spark and Python) and that the Kaggle price CSVs
-are available under `data/prices/`. Then execute:
+This project includes a **One-Shot Runner** for full reproducibility.
 
-```bash
-cd project-final
-./run_local.sh
-```
+1.  **Install Dependencies:**
+    ```bash
+    pip install pyspark pandas yfinance pyarrow pyyaml
+    ```
 
-You can adjust any aspect of the run via the YAML file `bda_project_config.yml`.
+2.  **Fetch Data:**
+    Downloads market data and generates the blockchain proxy dataset.
+    ```bash
+    python3 fetch_data.py
+    ```
 
-## Extending to blockchain data
+3.  **Run Pipeline:**
+    Executes Ingestion, ETL, Training, and Evaluation.
+    ```bash
+    ./run_local.sh
+    ```
 
-The baseline pipeline uses only price‑derived features. To incorporate
-blockchain metrics, decode the raw blk*.dat files (or download a
-precomputed Parquet) into a table with hourly aggregates (e.g. number
-of transactions, total transferred value) and set `blockchain_path` in
-the YAML config. Then set `use_blockchain: true` and list the
-appropriate column names under `blockchain_features`.
+---
+
+## 📂 Data Documentation
+
+### 1. Market Prices (Primary Source)
+* **Path:** `data/prices/btc_1h_data_2018_to_2025.csv`
+* **Description:** 1-minute OHLCV candles aggregated to 1-hour.
+* **Source:** Kaggle / Public Crypto Datasets.
+
+### 2. Blockchain Data (Proxy Strategy)
+* **Path:** `data/blockchain/btc_blockchain_hourly_shifted.parquet`
+* **Method:** Generated via `fetch_data.py` using Yahoo Finance API.
+* **Rationale:** Proxies on-chain activity using Trading Volume to bypass the need for a 500GB Full Node synchronization.
+
+### 3. Raw Blocks (Proof of Concept)
+* **Archive:** `data/btc_blocks_pruned_1GiB.tar.gz` (Not included in Git due to size).
+* **Live Folder:** `data/blocks/blocks/`
+* **Parser:** `src/decode_blocks.py` is provided to demonstrate capability to parse raw `.dat` Bitcoin Core files.
+* **Usage:** Run `python3 decode_blocks.py --input-dir data/blocks/blocks --output data/blockchain/debug.parquet` to verify.
+
+---
+
+## 📊 Outputs & Evidence
+
+* **Metrics:** `output/metrics.csv` contains the final Accuracy and AUC scores.
+* **Logs:** `output/logs/` (if enabled) or Console Output.
+* **Spark Evidence:** See `evidence/` folder for:
+    * `spark_dag.png`: The SQL execution plan graph.
+    * `spark_jobs.png`: Timeline of Spark stages.
+    * `explain_plan.txt`: Textual representation of the physical plan (`explain("formatted")`).
+
+---
+
+## ⚖️ Licenses & Citations
+
+* **Code:** MIT License.
+* **Data (Yahoo Finance):** Used via `yfinance` library for educational purposes.
+* **Data (Bitcoin Core):** Raw block format follows the Bitcoin Protocol specification (MIT).
+* **Spark:** Apache License 2.0.
