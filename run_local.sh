@@ -1,16 +1,42 @@
 #!/usr/bin/env bash
-# Simple wrapper to execute the Bitcoin prediction pipeline locally.
-#
-# This script configures Spark to run on all local cores and
-# forwards the YAML configuration file path to the Python entry point.
+# =============================================================================
+# RUNNER LOCAL - PROJET BDA BITCOIN
+# =============================================================================
+# Ce script lance le pipeline complet via Spark en mode local.
+# Il force l'utilisation de tous les cœurs CPU disponibles (local[*]).
+# =============================================================================
 
+# Arrête le script dès qu'une erreur survient
 set -euo pipefail
 
-# Path to configuration file. Adjust if necessary.
-CONFIG="bda_project_config.yml"
+# Configuration
+CONFIG_FILE="bda_project_config.yml"
+ENTRY_POINT="src/main.py"
 
+echo "-----------------------------------------------------------------------"
+echo "🚀 Lancement du Pipeline de Prédiction Bitcoin (BDA Project)"
+echo "-----------------------------------------------------------------------"
+echo "📂 Config : ${CONFIG_FILE}"
+echo "🐍 Script : ${ENTRY_POINT}"
+echo "-----------------------------------------------------------------------"
+
+# Vérification de l'existence de Spark
+if ! command -v spark-submit &> /dev/null; then
+    echo "❌ Erreur : 'spark-submit' est introuvable."
+    echo "   Vérifie que SPARK_HOME est bien défini et ajouté au PATH."
+    exit 1
+fi
+
+# Exécution
+# Note : on force 'spark.sql.shuffle.partitions=8' pour optimiser la vitesse
+# sur un PC portable (évite de créer 200 partitions vides par défaut).
 spark-submit \
-  --master local[*] \
+  --master "local[*]" \
   --conf spark.sql.shuffle.partitions=8 \
-  src/main.py \
-  --config "${CONFIG}"
+  --conf spark.driver.memory=4g \
+  "${ENTRY_POINT}" \
+  --config "${CONFIG_FILE}"
+
+echo "-----------------------------------------------------------------------"
+echo "✅ Pipeline terminé."
+echo "-----------------------------------------------------------------------"

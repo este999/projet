@@ -1,108 +1,135 @@
-from typing import Dict, Any, Optional
+"""Data ingestion module.
+
+This module handles the loading of raw data from external sources (CSV for prices,
+Parquet for blockchain metrics). It performs initial cleaning, schema validation,
+and type casting to ensure downstream processing receives consistent data formats.
+"""
+
+import logging
+from typing import Any, Dict, Optional
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
+from pyspark.sql.types import DoubleType, TimestampType
+
+# Logger standard pour suivre le chargement
+logger = logging.getLogger(__name__)
 
 
 def load_price_data(spark: SparkSession, cfg: Dict[str, Any]) -> DataFrame:
-    """Load historical price candles from CSV.
+    """Load historical price candles from CSV and normalize schema.
 
-    The data is filtered to the date range specified in the config and
-    columns are renamed to a standard schema (open, high, low, close,
-    volume).
+    The function filters data based on the configured date range, casts
+    financial columns to DoubleType, and renames columns to a standard
+    internal schema (open, high, low, close, volume).
+
+    Args:
+        spark: Active SparkSession.
+        cfg: Global configuration dictionary.
 
     Returns:
-        A Spark DataFrame with a timestamp column named ``ts_raw`` and
-        columns ``open``, ``high``, ``low``, ``close`` and ``volume``.
+        DataFrame with columns: [ts_raw, open, high, low, close, volume]
     """
     data_cfg = cfg["data"]
     path = data_cfg["price_path"]
+    
+    logger.info(f"Loading price data from: {path}")
 
-    # Read raw CSV with header. Types are strings by default.
-    df = (
-        spark.read
-        .option("header", True)
-        .csv(path)
-    )
+    # Lecture CSV avec en-tête
+    df = spark.read.option("header", True).csv(path)
 
-    # Colonne de timestamp (dans ton YAML: "Open time")
-    ts_col = data_cfg["price_timestamp_col"]
-
-    # Ici : on considère que la colonne contient déjà une date texte
-    # style "2018-01-01 00:00:00.000000 ".
-    # -> on trim et on parse directement en timestamp.
+    # 1. Gestion du Timestamp
+    ts_col_name = data_cfg.get("price_timestamp_col", "Open time")
+    # On trim les espaces et on convertit en timestamp
     df = df.withColumn(
         "ts_raw",
-        F.to_timestamp(F.trim(F.col(ts_col)))
+        F.to_timestamp(F.trim(F.col(ts_col_name)))
     )
 
-    # Filtre sur la plage de dates si défini dans le YAML
-    start = data_cfg.get("start_date")
-    end = data_cfg.get("end_date")
-    if start:
-        df = df.filter(F.col("ts_raw") >= F.lit(start))
-    if end:
-        df = df.filter(F.col("ts_raw") <= F.lit(end))
+    # 2. Filtrage temporel (Start / End date)
+    start_date = data_cfg.get("start_date")
+    end_date = data_cfg.get("end_date")
 
-    # Canonicalisation des colonnes de prix
-    df = (
-        df
-        .withColumnRenamed(data_cfg["price_open_col"], "open")
-        .withColumnRenamed(data_cfg["price_high_col"], "high")
-        .withColumnRenamed(data_cfg["price_low_col"], "low")
-        .withColumnRenamed(data_cfg["price_close_col"], "close")
-        .withColumnRenamed(data_cfg["price_volume_col"], "volume")
-        .select("ts_raw", "open", "high", "low", "close", "volume")
-    )
+    if start_date:
+        logger.info(f"Filtering prices >= {start_date}")
+        df = df.filter(F.col("ts_raw") >= F.lit(start_date))
+    
+    if end_date:
+        logger.info(f"Filtering prices <= {end_date}")
+        df = df.filter(F.col("ts_raw") <= F.lit(end_date))
 
-    return df
+    # 3. Renommage et Cast (Transtypage)
+    # Important : On force le type Double pour éviter les erreurs ML plus tard
+    col_mapping = {
+        data_cfg["price_open_col"]: "open",
+        data_cfg["price_high_col"]: "high",
+        data_cfg["price_low_col"]: "low",
+        data_cfg["price_close_col"]: "close",
+        data_cfg["price_volume_col"]: "volume",
+    }
+
+    for old_name, new_name in col_mapping.items():
+        # On prend la colonne, on la cast en Double, et on la renomme
+        df = df.withColumn(new_name, F.col(old_name).cast(DoubleType()))
+
+    # Sélection finale propre
+    return df.select("ts_raw", "open", "high", "low", "close", "volume")
 
 
 def load_blockchain_data(spark: SparkSession, cfg: Dict[str, Any]) -> Optional[DataFrame]:
-    """
-    Charge les features blockchain horaires depuis un parquet
-    et crée une colonne ts_hour alignée avec les prix.
+    """Load blockchain features from Parquet and align timestamps.
+
+    This function attempts to detect the timestamp column dynamically
+    to support different dataset sources (e.g., Yahoo Finance vs standard blocks).
+
+    Args:
+        spark: Active SparkSession.
+        cfg: Global configuration dictionary.
+
+    Returns:
+        DataFrame with an hourly-truncated timestamp 'ts_hour' or None if disabled.
     """
     data_cfg = cfg.get("data", {})
     path = data_cfg.get("blockchain_path")
 
-    # Si pas de chemin configuré → pas de features blockchain
+    # Vérification si la config demande la blockchain
     if not path:
-        print("[INFO] Pas de blockchain_path dans la config → on saute la partie blockchain.")
+        logger.warning("No blockchain path configured. Skipping blockchain features.")
         return None
 
-    print(f"[INFO] Lecture des features blockchain depuis : {path}")
-    df = spark.read.parquet(path)
+    logger.info(f"Loading blockchain data from: {path}")
+    
+    try:
+        df = spark.read.parquet(path)
+    except Exception as e:
+        logger.error(f"Failed to read parquet file at {path}: {e}")
+        raise e
 
     cols = df.columns
-    print(f"[INFO] Colonnes blockchain lues par Spark : {cols}")
-
-    # 1) Recherche de la colonne temporelle
-    #    On fait une détection *insensible à la casse* et on inclut 'timestamp'
+    
+    # 1. Détection intelligente de la colonne temporelle
+    # On cherche 'ts_hour', 'timestamp', 'date' etc. insensible à la casse
     lower_map = {c.lower(): c for c in cols}
-    candidates = ["ts_hour", "timestamp", "ts", "time", "block_time", "block_timestamp"]
-
-    ts_col = None
+    candidates = ["ts_hour", "timestamp", "ts", "date", "datetime"]
+    
+    found_ts_col = None
     for cand in candidates:
         if cand in lower_map:
-            ts_col = lower_map[cand]
+            found_ts_col = lower_map[cand]
             break
 
-    if ts_col is None:
-        # Si vraiment rien trouvé, on lève une erreur explicite
-        raise ValueError(
-            f"Impossible de trouver une colonne temporelle dans le parquet blockchain. "
-            f"Colonnes trouvées : {cols}"
-        )
+    if not found_ts_col:
+        msg = f"No timestamp column found in blockchain data. Available columns: {cols}"
+        logger.error(msg)
+        raise ValueError(msg)
 
-    print(f"[INFO] Colonne temporelle détectée pour la blockchain : {ts_col}")
+    logger.info(f"Detected blockchain timestamp column: '{found_ts_col}'")
 
-    # 2) On normalise en timestamp Spark et on tronque à l'heure
-    df = df.withColumn("ts_hour", F.date_trunc("hour", F.col(ts_col).cast("timestamp")))
-
-    # 3) On met ts_hour en premier pour le join avec les features prix
-    other_cols = [c for c in cols if c != ts_col]
-    ordered_cols = ["ts_hour"] + other_cols
-    df = df.select(*ordered_cols)
+    # 2. Normalisation temporelle (Arrondi à l'heure)
+    # Cela permet de faire la jointure parfaite avec les prix horaires
+    df = df.withColumn(
+        "ts_hour", 
+        F.date_trunc("hour", F.col(found_ts_col).cast(TimestampType()))
+    )
 
     return df

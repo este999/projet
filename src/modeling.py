@@ -1,112 +1,135 @@
-"""Training and evaluation for the Bitcoin price prediction models.
+"""Model training and evaluation module.
 
-This module encapsulates the logic for splitting data into temporal
-training and testing sets, building a simple logistic regression model
-using Spark MLlib, evaluating its performance, and persisting the
-metrics and model artefacts. It can be extended to support more
-complex models (e.g. random forests, gradient boosting) via the
-configuration file.
+This module encapsulates the machine learning workflow:
+1. Splitting data into time-based Train/Test sets.
+2. Building a Spark ML Pipeline (Assembler -> Scaler -> Model).
+3. Training the model (Random Forest, GBT, etc.).
+4. Evaluating performance (Accuracy, AUC).
+5. Saving metrics and model artifacts.
 """
 
-from typing import Dict, Any 
-from pathlib import Path
 import csv
-import os 
+import logging
+import os
+from typing import Any, Dict, Tuple
 
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 from pyspark.ml import Pipeline
 from pyspark.ml.feature import VectorAssembler, StandardScaler
-from pyspark.ml.classification import LogisticRegression, GBTClassifier
-from pyspark.ml.evaluation import BinaryClassificationEvaluator, MulticlassClassificationEvaluator
+from pyspark.ml.classification import (
+    LogisticRegression, 
+    GBTClassifier, 
+    RandomForestClassifier
+)
+from pyspark.ml.evaluation import (
+    BinaryClassificationEvaluator, 
+    MulticlassClassificationEvaluator
+)
+
+# Initialisation du logger pour suivre l'entraînement
+logger = logging.getLogger(__name__)
 
 
-def build_train_test(df_labeled: DataFrame, cfg: Dict[str, any]):
-    """Split the labeled dataset into training and testing sets based on time.
+def build_train_test(df_labeled: DataFrame, cfg: Dict[str, Any]) -> Tuple[DataFrame, DataFrame]:
+    """Split the dataset into training and testing sets based on configuration dates.
 
     Args:
-        df_labeled: DataFrame containing features and labels with ``ts_hour``.
-        cfg: Loaded configuration dictionary.
+        df_labeled: DataFrame containing features and the label column.
+        cfg: Configuration dictionary with 'train' parameters.
 
     Returns:
-        A tuple ``(train_df, test_df)`` where each is a Spark DataFrame.
+        Tuple (train_df, test_df).
     """
-    train_end = cfg["train"]["train_end_date"]
-    test_start = cfg["train"]["test_start_date"]
+    train_cfg = cfg.get("train", {})
+    train_end = train_cfg.get("train_end_date")
+    test_start = train_cfg.get("test_start_date")
 
+    logger.info(f"Splitting data... Train up to {train_end}, Test from {test_start}")
+
+    # Découpage temporel strict basé sur la colonne 'ts_hour'
     train_df = df_labeled.filter(F.col("ts_hour") <= F.lit(train_end))
     test_df = df_labeled.filter(F.col("ts_hour") >= F.lit(test_start))
+
+    logger.info(f"Train set size: {train_df.count()} rows")
+    logger.info(f"Test set size: {test_df.count()} rows")
+
     return train_df, test_df
 
 
 def train_and_evaluate(train_df: DataFrame, test_df: DataFrame, cfg: Dict[str, Any]) -> Dict[str, float]:
-    """Train a logistic regression classifier and evaluate its performance.
+    """Train the model defined in config and evaluate on test set.
 
-    Builds a simple ML pipeline composed of a ``VectorAssembler``,
-    ``StandardScaler`` and ``LogisticRegression`` model. Predictions are
-    scored using AUC ROC and accuracy metrics. Metrics are saved to
-    a CSV file, and the model is persisted to disk.
+    Args:
+        train_df: Training DataFrame.
+        test_df: Testing DataFrame.
+        cfg: Configuration dictionary.
+
+    Returns:
+        Dictionary of metrics (auc_roc, accuracy, n_train, n_test).
     """
-    # --- Features -----------------------------------------------------------
-    feat_cfg = cfg["features"]
+    # --- 1. Préparation des Features ----------------------------------------
+    feat_cfg = cfg.get("features", {})
     use_blockchain = feat_cfg.get("use_blockchain", False)
-    price_features = feat_cfg.get("price_features", [])
-    blockchain_features = feat_cfg.get("blockchain_features", [])
-
-    # colonnes candidates
-    feature_cols = list(price_features)
+    
+    # Récupération de la liste des features de prix
+    feature_cols = list(feat_cfg.get("price_features", []))
+    
+    # Ajout conditionnel des features blockchain
+    blockchain_cols = feat_cfg.get("blockchain_features", [])
     if use_blockchain:
-        feature_cols += blockchain_features
+        feature_cols += blockchain_cols
+        logger.info(f"Using blockchain features: {blockchain_cols}")
 
-    # on ne garde que les features qui existent vraiment dans le DataFrame
-    feature_cols = [c for c in feature_cols if c in train_df.columns]
+    # Vérification de sécurité : on ne garde que les colonnes qui existent vraiment
+    existing_cols = train_df.columns
+    valid_features = [c for c in feature_cols if c in existing_cols]
+    
+    # Alerte si des features demandées sont introuvables
+    if len(valid_features) < len(feature_cols):
+        missing = set(feature_cols) - set(valid_features)
+        logger.warning(f"Some features are missing from dataframe and ignored: {missing}")
 
-    # label (créé dans add_labels, généralement "label" ou "label_up")
-    label_col = cfg.get("label_col", "label")
+    label_col = cfg.get("label_col", "label_up")
 
-    # --- Séparation features prix / features blockchain ---------------------
-    # colonnes blockchain effectivement présentes parmi les features
-    bc_cols = [c for c in blockchain_features if c in feature_cols]
-    # colonnes "coeur" (prix) sur lesquelles on est strict pour les NA
-    core_cols = [c for c in feature_cols if c not in bc_cols]
+    # --- 2. Nettoyage des Données (NA handling) -----------------------------
+    # Stratégie :
+    # - Features Blockchain manquantes -> Remplacées par 0.0 (hypothèse d'absence d'activité ou de données)
+    # - Features Prix manquantes -> Suppression de la ligne (donnée corrompue)
+    
+    if use_blockchain:
+        # On ne remplit que les colonnes blockchain présentes
+        fill_dict = {c: 0.0 for c in blockchain_cols if c in valid_features}
+        if fill_dict:
+            train_df = train_df.fillna(fill_dict)
+            test_df = test_df.fillna(fill_dict)
 
-    # --- Config modèle ------------------------------------------------------
-    model_cfg = cfg.get("model", {})
-    model_type = model_cfg.get("type", "logistic_regression")
-    params = model_cfg.get("params", {})
+    # Suppression des lignes incomplètes restantes (prix ou label manquants)
+    train_df = train_df.dropna(subset=valid_features + [label_col])
+    test_df = test_df.dropna(subset=valid_features + [label_col])
 
-    output_cfg = cfg.get("output", {})
-    output_dir = output_cfg.get("path", "output")
-    os.makedirs(output_dir, exist_ok=True)
-
-    # --- Nettoyage NA -------------------------------------------------------
-    # 1) on drop uniquement si NA sur les features prix + label
-    subset_drop = core_cols + [label_col]
-    train_df = train_df.dropna(subset=subset_drop)
-    test_df = test_df.dropna(subset=subset_drop)
-
-    # 2) on remplace les NA des features blockchain (issues de la jointure) par 0
-    if bc_cols:
-        fill_vals = {c: 0.0 for c in bc_cols}
-        train_df = train_df.fillna(fill_vals)
-        test_df = test_df.fillna(fill_vals)
-
-    # (optionnel) petit debug :
-    # print("[DEBUG] n_train après nettoyage :", train_df.count())
-    # print("[DEBUG] n_test après nettoyage :", test_df.count())
-
-    # --- Pipeline ML --------------------------------------------------------
+    # --- 3. Construction du Pipeline ML -------------------------------------
+    # Assemblage des features en un vecteur unique
     assembler = VectorAssembler(
-        inputCols=feature_cols,
+        inputCols=valid_features,
         outputCol="features_raw",
+        handleInvalid="skip"  # Sécurité : ignore les lignes malformées silencieusement
     )
 
+    # Standardisation (Moyenne=0, Variance=1) -> Aide beaucoup les modèles linéaires
     scaler = StandardScaler(
         inputCol="features_raw",
         outputCol="features",
         withStd=True,
         withMean=True,
     )
+
+    # Instanciation du modèle selon la config
+    model_cfg = cfg.get("model", {})
+    model_type = model_cfg.get("type", "random_forest")
+    params = model_cfg.get("params", {})
+
+    logger.info(f"Initializing model: {model_type} with params: {params}")
 
     if model_type == "logistic_regression":
         clf = LogisticRegression(
@@ -121,21 +144,32 @@ def train_and_evaluate(train_df: DataFrame, test_df: DataFrame, cfg: Dict[str, A
             labelCol=label_col,
             featuresCol="features",
             maxDepth=params.get("maxDepth", 5),
-            maxIter=params.get("maxIter", 80),
+            maxIter=params.get("maxIter", 50),
             stepSize=params.get("stepSize", 0.1),
             seed=params.get("seed", 42),
         )
+    elif model_type == "random_forest":
+        clf = RandomForestClassifier(
+            labelCol=label_col,
+            featuresCol="features",
+            numTrees=params.get("numTrees", 100),
+            maxDepth=params.get("maxDepth", 10),
+            seed=params.get("seed", 42),
+        )
     else:
-        raise ValueError(f"Unknown model type: {model_type}")
+        raise ValueError(f"Unknown model type in config: {model_type}")
 
     pipeline = Pipeline(stages=[assembler, scaler, clf])
 
-    # --- Entraînement -------------------------------------------------------
+    # --- 4. Entraînement & Prédiction ---------------------------------------
+    logger.info("Training started...")
     model = pipeline.fit(train_df)
-
-    # --- Prédiction & métriques --------------------------------------------
+    logger.info("Training finished. Evaluating on test set...")
+    
     preds = model.transform(test_df)
 
+    # --- 5. Calcul des Métriques --------------------------------------------
+    # AUC-ROC (Capacité à distinguer les classes)
     evaluator_auc = BinaryClassificationEvaluator(
         labelCol=label_col,
         rawPredictionCol="rawPrediction",
@@ -143,9 +177,13 @@ def train_and_evaluate(train_df: DataFrame, test_df: DataFrame, cfg: Dict[str, A
     )
     auc = evaluator_auc.evaluate(preds)
 
-    correct = preds.filter(F.col("prediction") == F.col(label_col)).count()
-    total = preds.count()
-    acc = correct / total if total > 0 else 0.0
+    # Accuracy (Taux de bonnes prédictions)
+    evaluator_acc = MulticlassClassificationEvaluator(
+        labelCol=label_col,
+        predictionCol="prediction",
+        metricName="accuracy",
+    )
+    acc = evaluator_acc.evaluate(preds)
 
     metrics = {
         "auc_roc": float(auc),
@@ -153,16 +191,33 @@ def train_and_evaluate(train_df: DataFrame, test_df: DataFrame, cfg: Dict[str, A
         "n_train": int(train_df.count()),
         "n_test": int(test_df.count()),
     }
+    
+    logger.info(f"Evaluation Results: {metrics}")
 
-    # --- Sauvegarde modèle & métriques -------------------------------------
-    model_dir = os.path.join(output_dir, "models")
-    os.makedirs(model_dir, exist_ok=True)
-    model.write().overwrite().save(os.path.join(model_dir, f"{model_type}_pipeline"))
+    # --- 6. Sauvegarde des Résultats ----------------------------------------
+    output_cfg = cfg.get("output", {})
+    
+    # 6.1 Sauvegarde des métriques dans un CSV
+    metrics_path = output_cfg.get("metrics_csv", "output/metrics.csv")
+    os.makedirs(os.path.dirname(metrics_path), exist_ok=True)
+    
+    try:
+        with open(metrics_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(metrics.keys()))
+            writer.writeheader()
+            writer.writerow(metrics)
+        logger.info(f"Metrics saved to {metrics_path}")
+    except IOError as e:
+        logger.error(f"Failed to save metrics CSV: {e}")
 
-    metrics_path = os.path.join(output_dir, "metrics.csv")
-    with open(metrics_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(metrics.keys()))
-        writer.writeheader()
-        writer.writerow(metrics)
+    # 6.2 Sauvegarde du modèle complet (Pipeline)
+    models_dir = output_cfg.get("models_dir", "output/models")
+    model_path = os.path.join(models_dir, f"{model_type}_pipeline")
+    
+    try:
+        model.write().overwrite().save(model_path)
+        logger.info(f"Model artifact saved to {model_path}")
+    except Exception as e:
+        logger.warning(f"Could not save Spark model (folder might be locked/existing): {e}")
 
     return metrics

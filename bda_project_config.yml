@@ -1,6 +1,7 @@
 project:
   name: "btc_direction_prediction"
-  author: "Esteban Nabonne"
+  author: "Esteban Nabonne & Hadrien Dejonghe"
+  
 
 spark:
   master: "local[*]"
@@ -8,12 +9,13 @@ spark:
   log_level: "WARN"
 
 data:
-  # On ne prend que le 1-min pour l’instant
+  # Chemin vers le CSV des prix (2018-2025)
   price_path: "data/prices/btc_1h_data_2018_to_2025.csv"
 
-  # Pas encore de dataset blockchain décodé => on désactive
-  blockchain_path: "data/blockchain/btc_blockchain_hourly.parquet"
+  # Chemin vers les données Blockchain (Yahoo Proxy ou Parsed Blocks)
+  blockchain_path: "data/blockchain/btc_blockchain_hourly_shifted.parquet"
 
+  # Mappage des colonnes du CSV source
   price_timestamp_col: "Open time"
   price_open_col: "Open"
   price_high_col: "High"
@@ -22,47 +24,48 @@ data:
   price_volume_col: "Volume"
 
   timezone: "UTC"
-  start_date: "2019-01-01"
-  end_date: "2022-12-31"
-
   timestamp_is_unix: false
+
+  # Fenêtre globale du projet (Filtre les données hors de cette plage)
+  # On inclut 2018 (Crash) pour l'entraînement et on arrête fin 2022 (Crash Test)
+  start_date: "2018-01-01"
+  end_date: "2022-12-31"
 
 etl:
   resample_freq: "1 hour"
-  label_horizon_hours: 4
+  # Horizon de prédiction : 1h (court terme)
+  label_horizon_hours: 1
 
 features:
-  use_blockchain: true        # très important pour éviter le join sur un DF vide
+  use_blockchain: true
+  
   price_features:
     - "ret_1h"
     - "vol_1h"
     - "volatility_1h"
     - "high_low_ratio"
-    - "ret_1h_lag1"
-    - "ret_1h_lag2"
     - "ma_close_3h"
     - "ma_close_12h"
-    - "vol_24h"
+    
   blockchain_features:
     - "tx_count_hour"
-    - "total_value_hour"
+    # - "total_value_hour"  # (Optionnel : décommenter si besoin)
 
 label_col: "label_up"
 
 model:
-  type: gbt
+  type: random_forest
   params:
-    maxDepth: 5
-    maxIter: 50
-    stepSize: 0.1
+    numTrees: 150         # Nombre d'arbres (augmenté car dataset > 3 ans)
+    maxDepth: 7           # Profondeur (augmentée pour capturer plus de nuances)
     seed: 42
 
-
-
 train:
-  # End date of training period (inclusive)
+  # STRATÉGIE FINALE :
+  # Entraînement sur 2018 (Baisse), 2019, 2020, 2021 (Hausse)
   train_end_date: "2021-12-31"
-  # Start date of testing period (inclusive)
+  
+  # Test sur 2022 (Crash / Bear Market)
   test_start_date: "2022-01-01"
 
 output:
