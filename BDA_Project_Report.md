@@ -29,9 +29,10 @@ C'est un problème de **Classification Binaire Supervisée** :
 ## 2. Acquisition et Sélection des Données
 Nous avons dû arbitrer entre la pureté technique et la faisabilité temporelle du projet.
 
-### 2.1 Données de Prix (Source Principale)* **Source :** Fichier CSV historique (2018-2025).
-* **Contenu :** Bougies **OHLCV** (Open, High, Low, Close, Volume) à la minute.
-* **Utilité :** C'est la base indispensable pour calculer nos indicateurs techniques et notre variable cible.
+### 2.1 Données de Prix (Source Principale)
+* **Source :** Fichier CSV historique (2018-2025).
+* **Contenu :** Bougies **OHLCV** (Open, High, Low, Close, Volume) **agrégées à l'heure (1h)**.
+* **Utilité :** C'est la base indispensable pour calculer nos indicateurs techniques et notre variable cible. L'utilisation de données pré-agrégées (1h) au lieu de données minute optimise considérablement les temps de chargement et de traitement sur une architecture locale.
 
 ### 2.2 Données Blockchain (Le choix du Proxy)
 Nous souhaitions intégrer l'activité réelle du réseau (*On-Chain metrics*).
